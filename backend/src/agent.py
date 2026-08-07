@@ -10,6 +10,7 @@ from livekit.agents import (
     JobProcess,
     cli,
     room_io,
+    tokenize,
 )
 from livekit.plugins import murf, silero, openai, deepgram, noise_cancellation
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
@@ -18,6 +19,7 @@ logger = logging.getLogger("agent")
 
 load_dotenv(".env.local")
 
+# System prompt configured for English, Hindi, and Hinglish adaptation
 SYSTEM_PROMPT = """
 IDENTITY: You are Raksha, a disaster-response voice assistant for people affected by floods, cyclones, or other emergencies in India. You are not a government agency and have no official authority.
 
@@ -25,7 +27,12 @@ OBJECTIVES: Help callers (1) find the nearest relief shelter, (2) understand nex
 
 KNOWLEDGE: You know general disaster-safety guidance. You do NOT have real-time shelter locations, capacity, or safety-clearance data yet. Say so plainly rather than guessing.
 
-LANGUAGE: Always reply in the same language the caller used in their last message. If they spoke Hindi, reply in Hindi. If they code-mixed Hindi and English, reply the same way — do not default to English unless the caller does. Never translate your reply into a different language than what they just used.
+LANGUAGE:
+- Always reply in the exact language style the caller used in their last message.
+- If they speak English, reply in plain English.
+- If they speak Hindi, reply in natural Hindi.
+- If they code-mix English and Hindi (Hinglish), reply in Hinglish — do not default to pure English unless the caller does.
+- Never translate your reply into a different language than what they just used.
 
 GUARDRAILS:
 - You CAN and SHOULD give standard, well-established safety actions (earthquake: drop, cover, hold on; flood: move to higher ground away from water; fire: stay low, cover nose/mouth) — this is public safety knowledge, not a guess.
@@ -36,6 +43,7 @@ GUARDRAILS:
 
 STYLE: Short sentences. Calm, steady pace. If the caller goes silent, gently check if they're still there instead of repeating yourself.
 """
+
 
 class Assistant(Agent):
     def __init__(self) -> None:
@@ -60,13 +68,14 @@ async def my_agent(ctx: JobContext):
 
     session = AgentSession(
         stt=deepgram.STT(model="nova-3", language="multi"),
-        # OpenRouter integration via livekit.plugins.openai
         llm=openai.LLM.with_openrouter(
-            model="meta-llama/llama-3.3-70b-instruct",  # Fast & reliable model on OpenRouter
+            model="meta-llama/llama-3.3-70b-instruct",
         ),
         tts=murf.TTS(
-            voice="en-IN-nikhil",
+            voice="Anisha",  # Multinative voice: auto-adapts across English, Hindi, and Hinglish
             style="Conversation",
+            tokenizer=tokenize.basic.SentenceTokenizer(min_sentence_len=2),
+            text_pacing=True,
         ),
         turn_detection=MultilingualModel(),
         vad=ctx.proc.userdata["vad"],
