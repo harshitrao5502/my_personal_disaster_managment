@@ -133,6 +133,9 @@ export interface AgentSessionView_01Props {
    */
   isPreConnectBufferEnabled?: boolean;
 
+  /** State of low bandwidth mode */
+  lowBandwidthMode?: boolean;
+
   /** Selects the visualizer style rendered in the main tile area. */
   audioVisualizerType?: 'bar' | 'wave' | 'grid' | 'radial' | 'aura';
   /** Primary hex color used by supported audio visualizer variants. */
@@ -161,6 +164,8 @@ export function AgentSessionView_01({
   supportsVideoInput = true,
   supportsScreenShare = true,
   isPreConnectBufferEnabled = true,
+
+  lowBandwidthMode = false,
 
   audioVisualizerType,
   audioVisualizerColor,
@@ -201,48 +206,71 @@ export function AgentSessionView_01({
   return (
     <section
       ref={ref}
-      className={cn('bg-background relative z-10 h-full w-full overflow-hidden', className)}
+      className={cn(
+        'bg-background relative z-10 flex h-full w-full flex-col overflow-hidden',
+        className
+      )}
       {...props}
     >
-      <Fade top className="absolute inset-x-4 top-0 z-10 h-40" />
-      {/* transcript */}
+      <Fade top className="pointer-events-none absolute inset-x-4 top-0 z-10 h-40" />
 
-      <div className="absolute top-0 bottom-[135px] flex w-full flex-col md:bottom-[170px]">
-        <AnimatePresence>
-          {chatOpen && (
-            <motion.div
-              {...CHAT_MOTION_PROPS}
-              className="flex h-full w-full flex-col gap-4 space-y-3 transition-opacity duration-300 ease-out"
-            >
-              <AgentChatTranscript
-                agentState={agentState}
-                messages={messages}
-                className="mx-auto w-full max-w-2xl [&_.is-user>div]:rounded-[22px] [&>div>div]:px-4 [&>div>div]:pt-40 md:[&>div>div]:px-6"
-              />
-            </motion.div>
-          )}
-        </AnimatePresence>
-      </div>
-      {/* Tile layout */}
-      <TileLayout
-        chatOpen={chatOpen}
-        audioVisualizerType={audioVisualizerType}
-        audioVisualizerColor={audioVisualizerColor}
-        audioVisualizerColorShift={audioVisualizerColorShift}
-        audioVisualizerBarCount={audioVisualizerBarCount}
-        audioVisualizerRadialBarCount={audioVisualizerRadialBarCount}
-        audioVisualizerRadialRadius={audioVisualizerRadialRadius}
-        audioVisualizerGridRowCount={audioVisualizerGridRowCount}
-        audioVisualizerGridColumnCount={audioVisualizerGridColumnCount}
-        audioVisualizerWaveLineWidth={audioVisualizerWaveLineWidth}
-      />
-      {/* Bottom */}
+      {chatOpen ? (
+        <div className="flex min-h-0 w-full flex-1 flex-col">
+          {/* Dedicated Header for Visualizer & Status */}
+          <TileLayout
+            chatOpen={chatOpen}
+            lowBandwidthMode={lowBandwidthMode}
+            audioVisualizerType={audioVisualizerType}
+            audioVisualizerColor={audioVisualizerColor}
+            audioVisualizerColorShift={audioVisualizerColorShift}
+            audioVisualizerBarCount={audioVisualizerBarCount}
+            audioVisualizerRadialBarCount={audioVisualizerRadialBarCount}
+            audioVisualizerRadialRadius={audioVisualizerRadialRadius}
+            audioVisualizerGridRowCount={audioVisualizerGridRowCount}
+            audioVisualizerGridColumnCount={audioVisualizerGridColumnCount}
+            audioVisualizerWaveLineWidth={audioVisualizerWaveLineWidth}
+          />
+
+          {/* Scrollable Transcript Area */}
+          <div className="relative min-h-0 flex-1 overflow-y-auto pb-32 md:pb-40">
+            <AnimatePresence>
+              <motion.div
+                {...CHAT_MOTION_PROPS}
+                className="flex h-full w-full flex-col gap-4 space-y-3 transition-opacity duration-300 ease-out"
+              >
+                <AgentChatTranscript
+                  agentState={agentState}
+                  messages={messages}
+                  className="mx-auto w-full max-w-2xl [&_.is-user>div]:rounded-[22px] [&>div>div]:px-4 [&>div>div]:pt-6 md:[&>div>div]:px-6"
+                />
+              </motion.div>
+            </AnimatePresence>
+          </div>
+        </div>
+      ) : (
+        /* Normal absolute layout for non-chat mode */
+        <TileLayout
+          chatOpen={chatOpen}
+          lowBandwidthMode={lowBandwidthMode}
+          audioVisualizerType={audioVisualizerType}
+          audioVisualizerColor={audioVisualizerColor}
+          audioVisualizerColorShift={audioVisualizerColorShift}
+          audioVisualizerBarCount={audioVisualizerBarCount}
+          audioVisualizerRadialBarCount={audioVisualizerRadialBarCount}
+          audioVisualizerRadialRadius={audioVisualizerRadialRadius}
+          audioVisualizerGridRowCount={audioVisualizerGridRowCount}
+          audioVisualizerGridColumnCount={audioVisualizerGridColumnCount}
+          audioVisualizerWaveLineWidth={audioVisualizerWaveLineWidth}
+        />
+      )}
+
+      {/* Bottom control bar (remains absolutely positioned over the view) */}
       <motion.div
         {...BOTTOM_VIEW_MOTION_PROPS}
         className="absolute inset-x-3 bottom-0 z-50 md:inset-x-12"
       >
         {/* Pre-connect message */}
-        {isPreConnectBufferEnabled && (
+        {isPreConnectBufferEnabled && !chatOpen && (
           <AnimatePresence>
             {messages.length === 0 && (
               <MotionMessage

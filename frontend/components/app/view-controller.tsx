@@ -30,9 +30,10 @@ const VIEW_MOTION_PROPS = {
 
 interface ViewControllerProps {
   appConfig: AppConfig;
+  lowBandwidthMode: boolean;
 }
 
-export function ViewController({ appConfig }: ViewControllerProps) {
+export function ViewController({ appConfig, lowBandwidthMode }: ViewControllerProps) {
   const { isConnected, start } = useSessionContext();
   const { resolvedTheme } = useTheme();
 
@@ -52,6 +53,7 @@ export function ViewController({ appConfig }: ViewControllerProps) {
         <MotionSessionView
           key="session-view"
           {...VIEW_MOTION_PROPS}
+          lowBandwidthMode={lowBandwidthMode}
           supportsChatInput={appConfig.supportsChatInput}
           supportsVideoInput={appConfig.supportsVideoInput}
           supportsScreenShare={appConfig.supportsScreenShare}
