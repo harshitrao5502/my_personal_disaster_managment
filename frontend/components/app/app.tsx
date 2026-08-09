@@ -28,11 +28,41 @@ interface AppProps {
 }
 
 export function App({ appConfig }: AppProps) {
+  const participantIdentity = useMemo(() => {
+    if (typeof window === 'undefined') return '';
+    let id = localStorage.getItem('raksha_user_id');
+    if (!id) {
+      if (typeof crypto !== 'undefined' && crypto.randomUUID) {
+        id = crypto.randomUUID();
+      } else {
+        id = 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (c) {
+          const r = (Math.random() * 16) | 0,
+            v = c === 'x' ? r : (r & 0x3) | 0x8;
+          return v.toString(16);
+        });
+      }
+      localStorage.setItem('raksha_user_id', id);
+    }
+    return id;
+  }, []);
+
   const tokenSource = useMemo(() => {
     return typeof process.env.NEXT_PUBLIC_CONN_DETAILS_ENDPOINT === 'string'
-      ? getSandboxTokenSource(appConfig)
-      : TokenSource.endpoint('/api/token');
-  }, [appConfig]);
+      ? getSandboxTokenSource(appConfig, participantIdentity)
+      : TokenSource.custom(async () => {
+          const res = await fetch('/api/token', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ identity: participantIdentity }),
+          });
+          if (!res.ok) {
+            throw new Error(`Failed to fetch token: ${res.statusText}`);
+          }
+          return await res.json();
+        });
+  }, [appConfig, participantIdentity]);
 
   const session = useSession(
     tokenSource,
