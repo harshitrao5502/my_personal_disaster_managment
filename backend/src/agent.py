@@ -1,5 +1,7 @@
 import logging
+import os
 
+import httpx
 from dotenv import load_dotenv
 from livekit import rtc
 from livekit.agents import (
@@ -26,13 +28,23 @@ load_dotenv(".env.local")
 
 init_db()
 
+OPENWEATHER_API_KEY = os.environ.get("OPENWEATHER_API_KEY")
+
 # System prompt configured for English, Hindi, and Hinglish adaptation
 SYSTEM_PROMPT = """
-IDENTITY: You are Raksha, a disaster-response voice assistant for people affected by floods, cyclones, or other emergencies in India. You are not a government agency and have no official authority.
+IDENTITY: You are Raksha (रक्षा in Hindi), a disaster-response voice assistant for people affected by floods, cyclones, or other emergencies in India. You are not a government agency and have no official authority.
 
 OBJECTIVES: Help callers (1) find the nearest relief shelter, (2) understand next safety steps, (3) know how to report a missing person. A successful call ends with the caller having a clear, honest next action.
 
 KNOWLEDGE: You know general disaster-safety guidance. You do NOT have real-time shelter locations, capacity, or safety-clearance data yet. Say so plainly rather than guessing.
+- You now have access to get_weather_alert_status, which fetches real current weather
+  conditions for a named district/city using OpenWeatherMap. When a caller asks about weather, rain, flood
+  risk, or current safety conditions somewhere, call this tool rather than guessing.
+  Narrate the result naturally (temperature, rainfall, conditions) — never read out
+  raw numbers/JSON structure. Always mention this is current weather data, not an
+  official government evacuation order or alert. If the tool returns an error, say so
+  honestly and suggest an alternative (IMD's site, local news, emergency services) —
+  never invent a plausible-sounding answer.
 
 LANGUAGE & SCRIPT:
 - Always reply in the exact language style the caller used in their last message.
@@ -112,6 +124,80 @@ async def forget_caller(context: RunContext, user_id: str):
     return {"forgotten": True}
 
 
+@function_tool()
+async def get_weather_alert_status(context: RunContext, district: str):
+    """Check current weather conditions for an Indian district or city to assess
+    disaster risk — heavy rainfall, flood risk, heatwave, etc. Call this whenever
+    the caller asks about current weather, flood risk, or safety conditions in a
+    specific place. Always tell the caller this is current data and mention it's
+    not an official government alert."""
+    logger.info(f"[TOOL CALLED] get_weather_alert_status(district={district!r})")
+
+    if not OPENWEATHER_API_KEY:
+        logger.warning("[TOOL ERROR] OPENWEATHER_API_KEY not set in .env.local")
+        return {
+            "error": "Weather data service is not configured right now. Tell the caller you "
+            "can't check live conditions at the moment and suggest they check IMD's "
+            "official site or local news for weather alerts."
+        }
+
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            resp = await client.get(
+                "https://api.openweathermap.org/data/2.5/weather",
+                params={
+                    "q": f"{district},IN",
+                    "appid": OPENWEATHER_API_KEY,
+                    "units": "metric",
+                },
+            )
+            
+            if resp.status_code == 404:
+                logger.warning(f"[TOOL ERROR] District '{district}' not found on OpenWeatherMap")
+                return {
+                    "error": f"Could not find a weather station matching '{district}'. "
+                    "Tell the caller you don't have data for that exact place and ask "
+                    "if there's a nearby bigger town or city you could check instead."
+                }
+
+            resp.raise_for_status()
+            data = resp.json()
+
+            city_name = data.get("name", district)
+            temp = data.get("main", {}).get("temp")
+            humidity = data.get("main", {}).get("humidity")
+            weather_desc = data.get("weather", [{}])[0].get("description", "clear")
+            wind_speed = data.get("wind", {}).get("speed")
+
+            formatted_payload = {
+                "source": "OpenWeatherMap API — live atmospheric data, not an official government evacuation alert",
+                "city": city_name,
+                "temperature_celsius": temp,
+                "humidity_percent": humidity,
+                "condition": weather_desc,
+                "wind_speed_mps": wind_speed,
+            }
+
+            logger.info(f"[TOOL RESULT] get_weather_alert_status -> {formatted_payload}")
+            return formatted_payload
+
+    except httpx.TimeoutException:
+        logger.warning("[TOOL ERROR] OpenWeatherMap API timed out")
+        return {
+            "error": "The weather service timed out. Tell the caller honestly that "
+            "you couldn't reach live weather data right now, and suggest checking "
+            "IMD's official site, local news, or calling local authorities for "
+            "current conditions. Do not guess or make up numbers."
+        }
+    except Exception as e:
+        logger.warning(f"[TOOL ERROR] OpenWeatherMap API failed: {e}")
+        return {
+            "error": "The weather service is unavailable right now. Tell the caller "
+            "honestly that live data isn't reachable and suggest an alternative "
+            "source. Do not guess or make up numbers."
+        }
+
+
 class Assistant(Agent):
     def __init__(self, caller_user_id: str) -> None:
         super().__init__(
@@ -119,7 +205,7 @@ class Assistant(Agent):
             + f'\n\nCALLER_ID: The current caller\'s user_id is "{caller_user_id}". '
             f"Use this exact value whenever you call lookup_caller, remember_caller, "
             f"or forget_caller — never ask the caller for an ID.",
-            tools=[lookup_caller, remember_caller, forget_caller],
+            tools=[lookup_caller, remember_caller, forget_caller, get_weather_alert_status],
         )
 
 
@@ -141,7 +227,6 @@ async def my_agent(ctx: JobContext):
 
     await ctx.connect()
 
-    # Wait for the caller's participant to be present, then grab their stable identity
     participant = await ctx.wait_for_participant()
     caller_user_id = participant.identity
     logger.info(f"[SESSION] caller_user_id resolved as: {caller_user_id!r}")
