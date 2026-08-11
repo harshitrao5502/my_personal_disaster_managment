@@ -1,5 +1,6 @@
 import logging
 import os
+import asyncio
 
 import httpx
 from dotenv import load_dotenv
@@ -32,7 +33,7 @@ OPENWEATHER_API_KEY = os.environ.get("OPENWEATHER_API_KEY")
 
 # System prompt configured for English, Hindi, and Hinglish adaptation
 SYSTEM_PROMPT = """
-IDENTITY: You are Raksha (रक्षा in Hindi), a disaster-response voice assistant for people affected by floods, cyclones, or other emergencies in India. You are not a government agency and have no official authority.
+IDENTITY: You are Raksha (रक्षा in Hindi), a disaster-response voice assistant for people affected by floods, cyclones, or other emergencies in India. You are not a government agency and have no official authority. Always spell your name as रक्षा in Hindi, never राखा.
 
 OBJECTIVES: Help callers (1) find the nearest relief shelter, (2) understand next safety steps, (3) know how to report a missing person. A successful call ends with the caller having a clear, honest next action.
 
@@ -199,12 +200,16 @@ async def get_weather_alert_status(context: RunContext, district: str):
 
 
 class Assistant(Agent):
-    def __init__(self, caller_user_id: str) -> None:
-        super().__init__(
-            instructions=SYSTEM_PROMPT
+    def __init__(self, caller_user_id: str, custom_instructions: str = "") -> None:
+        full_instructions = (
+            SYSTEM_PROMPT
+            + custom_instructions
             + f'\n\nCALLER_ID: The current caller\'s user_id is "{caller_user_id}". '
             f"Use this exact value whenever you call lookup_caller, remember_caller, "
-            f"or forget_caller — never ask the caller for an ID.",
+            f"or forget_caller — never ask the caller for an ID."
+        )
+        super().__init__(
+            instructions=full_instructions,
             tools=[lookup_caller, remember_caller, forget_caller, get_weather_alert_status],
         )
 
@@ -231,6 +236,17 @@ async def my_agent(ctx: JobContext):
     caller_user_id = participant.identity
     logger.info(f"[SESSION] caller_user_id resolved as: {caller_user_id!r}")
 
+    # Detect if this connection originates from a SIP/telephony call
+    is_sip_call = participant.kind == rtc.ParticipantKind.PARTICIPANT_KIND_SIP
+
+    custom_instructions = ""
+    if is_sip_call:
+        custom_instructions = """
+        \n\nOUTBOUND CALL INSTRUCTIONS: You are placing an automated proactive safety welfare check call. 
+        If the user says "stop", "disconnect", or requests not to be called again, immediately say 
+        "Understood, ending the call now. Stay safe." and wrap up the conversation.
+        """
+
     session = AgentSession(
         stt=deepgram.STT(model="nova-3", language="multi"),
         llm=openai.LLM.with_openrouter(
@@ -247,8 +263,25 @@ async def my_agent(ctx: JobContext):
         preemptive_generation=True,
     )
 
+    # Trigger proactive greeting AFTER giving the SIP media stream a moment to establish
+    @session.on("agent_started")
+    def _on_agent_started():
+        if is_sip_call:
+            async def send_delayed_greeting():
+                # Wait 1.5 seconds for the Linphone RTP audio socket to fully open
+                await asyncio.sleep(1.5)
+                opening_message = (
+                    "Namaste Rahul, this is Raksha, an automated safety check-in assistant. "
+                    "I am calling because our records show you have a disabled grandfather and a pet dog in a flood-risk zone, and I want to ensure you are safe. "
+                    "Say 'stop' at any time to end this call and opt out. Are you both okay right now?"
+                )
+                logger.info("[SIP] Sending outbound welfare check greeting...")
+                await session.say(opening_message)
+
+            ctx.create_task(send_delayed_greeting())
+
     await session.start(
-        agent=Assistant(caller_user_id=caller_user_id),
+        agent=Assistant(caller_user_id=caller_user_id, custom_instructions=custom_instructions),
         room=ctx.room,
         room_options=room_io.RoomOptions(
             audio_input=room_io.AudioInputOptions(
