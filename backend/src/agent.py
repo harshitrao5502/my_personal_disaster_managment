@@ -1,6 +1,8 @@
+import asyncio
 import logging
 import os
-import asyncio
+import uuid
+from typing import Optional
 
 import httpx
 from dotenv import load_dotenv
@@ -17,10 +19,10 @@ from livekit.agents import (
     room_io,
     tokenize,
 )
-from livekit.plugins import murf, silero, openai, deepgram, noise_cancellation
+from livekit.plugins import deepgram, murf, noise_cancellation, openai, silero
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
 
-from memory import init_db, get_caller, save_caller, delete_caller
+from memory import delete_caller, get_caller, init_db, save_caller
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("agent")
@@ -30,6 +32,7 @@ load_dotenv(".env.local")
 init_db()
 
 OPENWEATHER_API_KEY = os.environ.get("OPENWEATHER_API_KEY")
+DISCORD_ESCALATION_WEBHOOK_URL = os.environ.get("DISCORD_ESCALATION_WEBHOOK_URL")
 
 # System prompt configured for English, Hindi, and Hinglish adaptation
 SYSTEM_PROMPT = """
@@ -70,6 +73,23 @@ MEMORY (IMPORTANT — you MUST use these tools, don't just talk about rememberin
 - If they say no or don't clearly agree, do NOT call remember_caller.
 - If a caller asks to be forgotten, call forget_caller and confirm it's done.
 
+ESCALATION (CRITICAL — you MUST follow these instructions when escalation is needed):
+- You MUST recognize two specific escalation triggers:
+  1. The caller is trapped, injured, or in immediate physical danger where standard safety advice is not sufficient and they need urgent local help.
+  2. The caller is reporting a missing person.
+- When either trigger is met, do NOT try to solve it alone. Recognize this needs human or authority involvement.
+- BEFORE calling the create_escalation tool, you MUST explicitly explain to the caller what information you want to send to a human responder and ask for their consent.
+  - You MUST verbally say a concrete phrase: "I want to send your name, that you are [trapped/injured/missing], and your follow-up preferences to a human responder — is that okay?" (or equivalent in Hindi/Hinglish depending on user language).
+  - You MUST wait for their response. Do NOT call the create_escalation tool until they have given clear consent in the immediately preceding turn.
+- If the caller says yes / haan / please do / any clear agreement, you MUST immediately call the create_escalation tool with the summarized details.
+- If the caller says no or does not clearly agree, do NOT call create_escalation.
+- You MUST NOT invent, guess, or assume follow-up preferences (e.g. do not assume "phone call" unless stated).
+  - You MUST ask the caller: "How should the responders follow up with you (e.g. call back, text)?" or check their known preferences.
+  - If they do not specify, you MUST pass "not specified" to the tool — never invent a preference.
+- Never include sensitive private information (passwords, OTPs, PINs, account numbers) in the escalation summary, even if the caller mentioned them.
+- Once you call the tool, provide the caller with the reference_id returned by the tool (e.g., "A human responder has been notified with reference ID <id>. They'll follow up as soon as possible.") and explain next steps honestly without overpromising immediate response unless it's guaranteed.
+- If the conversation is normal (e.g. asking general safety questions) and does not meet the two triggers, do NOT call create_escalation.
+
 STYLE: Short sentences. Calm, steady pace. If the caller goes silent, gently check if they're still there instead of repeating yourself.
 """
 
@@ -91,11 +111,11 @@ async def lookup_caller(context: RunContext, user_id: str):
 async def remember_caller(
     context: RunContext,
     user_id: str,
-    name: str = None,
-    language_preference: str = None,
-    location: str = None,
-    household_size: str = None,
-    mobility_needs: str = None,
+    name: Optional[str] = None,
+    language_preference: Optional[str] = None,
+    location: Optional[str] = None,
+    household_size: Optional[str] = None,
+    mobility_needs: Optional[str] = None,
 ):
     """Save or update what you've learned about this caller. ONLY call this AFTER
     the caller has explicitly agreed to let you remember this information."""
@@ -111,8 +131,10 @@ async def remember_caller(
     if mobility_needs:
         facts["mobility_needs"] = mobility_needs
 
-    save_caller(user_id, name=name, language_preference=language_preference, facts=facts)
-    logger.info(f"[TOOL RESULT] remember_caller -> saved")
+    save_caller(
+        user_id, name=name, language_preference=language_preference, facts=facts
+    )
+    logger.info("[TOOL RESULT] remember_caller -> saved")
     return {"saved": True}
 
 
@@ -123,6 +145,88 @@ async def forget_caller(context: RunContext, user_id: str):
     logger.info(f"[TOOL CALLED] forget_caller(user_id={user_id!r})")
     delete_caller(user_id)
     return {"forgotten": True}
+
+
+@function_tool()
+async def create_escalation(
+    context: RunContext,
+    user_id: str,
+    who: str,
+    what_happened: str,
+    what_advised: str,
+    urgency: str,
+    language_preference: str,
+    follow_up_method: str,
+):
+    """CRITICAL: DO NOT CALL THIS TOOL IMMEDIATELY UPON RECOGNIZING AN EMERGENCY.
+    You MUST first explicitly list the exact details you want to send to the caller,
+    ask for their verbal consent, and wait for a clear 'yes' or agreement.
+    Only call this tool after they have explicitly said yes to letting you escalate."""
+    logger.info(
+        f"[TOOL CALLED] create_escalation(user_id={user_id!r}, who={who!r}, what_happened={what_happened!r}, "
+        f"what_advised={what_advised!r}, urgency={urgency!r}, language={language_preference!r}, follow_up={follow_up_method!r})"
+    )
+
+    ref_id = str(uuid.uuid4())[:8]
+
+    if not DISCORD_ESCALATION_WEBHOOK_URL:
+        logger.warning(
+            "[TOOL ERROR] DISCORD_ESCALATION_WEBHOOK_URL is not set in environment"
+        )
+        return {
+            "error": "Human responder system is currently offline. Tell the caller honestly that you "
+            "cannot connect to the escalation system right now, and suggest they call emergency services immediately.",
+            "reference_id": ref_id,
+            "success": False,
+        }
+
+    payload = {
+        "embeds": [
+            {
+                "title": "🚨 Raksha Emergency Escalation",
+                "color": 15548997
+                if urgency.lower() in ["emergency", "high"]
+                else 16753920,
+                "fields": [
+                    {"name": "Reference ID", "value": f"`{ref_id}`", "inline": True},
+                    {"name": "User ID / Caller ID", "value": user_id, "inline": True},
+                    {"name": "Urgency", "value": urgency.upper(), "inline": True},
+                    {"name": "Who needs help", "value": who, "inline": True},
+                    {
+                        "name": "Follow-up Method",
+                        "value": follow_up_method,
+                        "inline": True,
+                    },
+                    {
+                        "name": "Language Preference",
+                        "value": language_preference,
+                        "inline": True,
+                    },
+                    {"name": "What Happened", "value": what_happened, "inline": False},
+                    {
+                        "name": "Safety Guidance Already Advised",
+                        "value": what_advised,
+                        "inline": False,
+                    },
+                ],
+                "footer": {"text": "Raksha Disaster Response Assistant"},
+            }
+        ]
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            resp = await client.post(DISCORD_ESCALATION_WEBHOOK_URL, json=payload)
+            resp.raise_for_status()
+            logger.info(f"[TOOL RESULT] create_escalation -> success (ref_id={ref_id})")
+            return {"success": True, "reference_id": ref_id}
+    except Exception as e:
+        logger.error(f"[TOOL ERROR] Failed to send Discord webhook: {e}")
+        return {
+            "error": f"Failed to deliver escalation notification: {e}. Suggest calling emergency services directly.",
+            "reference_id": ref_id,
+            "success": False,
+        }
 
 
 @function_tool()
@@ -152,9 +256,11 @@ async def get_weather_alert_status(context: RunContext, district: str):
                     "units": "metric",
                 },
             )
-            
+
             if resp.status_code == 404:
-                logger.warning(f"[TOOL ERROR] District '{district}' not found on OpenWeatherMap")
+                logger.warning(
+                    f"[TOOL ERROR] District '{district}' not found on OpenWeatherMap"
+                )
                 return {
                     "error": f"Could not find a weather station matching '{district}'. "
                     "Tell the caller you don't have data for that exact place and ask "
@@ -179,7 +285,9 @@ async def get_weather_alert_status(context: RunContext, district: str):
                 "wind_speed_mps": wind_speed,
             }
 
-            logger.info(f"[TOOL RESULT] get_weather_alert_status -> {formatted_payload}")
+            logger.info(
+                f"[TOOL RESULT] get_weather_alert_status -> {formatted_payload}"
+            )
             return formatted_payload
 
     except httpx.TimeoutException:
@@ -206,11 +314,17 @@ class Assistant(Agent):
             + custom_instructions
             + f'\n\nCALLER_ID: The current caller\'s user_id is "{caller_user_id}". '
             f"Use this exact value whenever you call lookup_caller, remember_caller, "
-            f"or forget_caller — never ask the caller for an ID."
+            f"forget_caller, or create_escalation — never ask the caller for an ID."
         )
         super().__init__(
             instructions=full_instructions,
-            tools=[lookup_caller, remember_caller, forget_caller, get_weather_alert_status],
+            tools=[
+                lookup_caller,
+                remember_caller,
+                forget_caller,
+                get_weather_alert_status,
+                create_escalation,
+            ],
         )
 
 
@@ -242,8 +356,8 @@ async def my_agent(ctx: JobContext):
     custom_instructions = ""
     if is_sip_call:
         custom_instructions = """
-        \n\nOUTBOUND CALL INSTRUCTIONS: You are placing an automated proactive safety welfare check call. 
-        If the user says "stop", "disconnect", or requests not to be called again, immediately say 
+        \n\nOUTBOUND CALL INSTRUCTIONS: You are placing an automated proactive safety welfare check call.
+        If the user says "stop", "disconnect", or requests not to be called again, immediately say
         "Understood, ending the call now. Stay safe." and wrap up the conversation.
         """
 
@@ -267,6 +381,7 @@ async def my_agent(ctx: JobContext):
     @session.on("agent_started")
     def _on_agent_started():
         if is_sip_call:
+
             async def send_delayed_greeting():
                 # Wait 1.5 seconds for the Linphone RTP audio socket to fully open
                 await asyncio.sleep(1.5)
@@ -281,13 +396,16 @@ async def my_agent(ctx: JobContext):
             ctx.create_task(send_delayed_greeting())
 
     await session.start(
-        agent=Assistant(caller_user_id=caller_user_id, custom_instructions=custom_instructions),
+        agent=Assistant(
+            caller_user_id=caller_user_id, custom_instructions=custom_instructions
+        ),
         room=ctx.room,
         room_options=room_io.RoomOptions(
             audio_input=room_io.AudioInputOptions(
                 noise_cancellation=lambda params: (
                     noise_cancellation.BVCTelephony()
-                    if params.participant.kind == rtc.ParticipantKind.PARTICIPANT_KIND_SIP
+                    if params.participant.kind
+                    == rtc.ParticipantKind.PARTICIPANT_KIND_SIP
                     else noise_cancellation.BVC()
                 ),
             ),
