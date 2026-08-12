@@ -1,7 +1,7 @@
 {
   "sip_trunk": {
-    "name": "linphone-outbound",
+    "name": "linphone-trunk",
     "outbound_address": "sip.linphone.org",
-    "outbound_numbers": ["*"]
+    "outbound_numbers": ["+12345678"]
   }
 }
