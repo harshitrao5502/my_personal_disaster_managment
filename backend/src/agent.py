@@ -1,7 +1,10 @@
 import asyncio
+import json
 import logging
 import os
+import threading
 import uuid
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Optional
 
 import httpx
@@ -22,7 +25,15 @@ from livekit.agents import (
 from livekit.plugins import deepgram, murf, noise_cancellation, openai, silero
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
 
-from memory import delete_caller, get_caller, init_db, save_caller
+from memory import (
+    delete_caller,
+    get_call_stats,
+    get_caller,
+    init_db,
+    mark_call_outcome,
+    save_caller,
+    start_call_record,
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("agent")
@@ -63,6 +74,7 @@ GUARDRAILS:
 - Never claim real-time facts you don't have: a shelter's exact location, capacity, current road status, or an official evacuation order in effect right now. Say plainly you don't have that live data.
 - If they can reach emergency services, mention it as one option — not the only answer to every question.
 - Never guess at a phone number or address you're not certain of.
+- Do NOT trigger create_escalation for general, educational, or hypothetical safety questions. ONLY ask for permission to escalate if the caller explicitly states that they or someone with them is currently in active, real-time danger. You MUST wait for their explicit verbal consent before executing the create_escalation tool.
 
 MEMORY (IMPORTANT — you MUST use these tools, don't just talk about remembering):
 - At the very start of every call, before saying anything else beyond a greeting, call the lookup_caller tool using the CALLER_ID given to you below. Do this silently — don't tell the caller you're "checking a database."
@@ -154,14 +166,17 @@ async def create_escalation(
     who: str,
     what_happened: str,
     what_advised: str,
-    urgency: str,
-    language_preference: str,
-    follow_up_method: str,
+    urgency: str = "medium",
+    language_preference: str = "English",
+    follow_up_method: str = "not specified",
 ):
-    """CRITICAL: DO NOT CALL THIS TOOL IMMEDIATELY UPON RECOGNIZING AN EMERGENCY.
-    You MUST first explicitly list the exact details you want to send to the caller,
-    ask for their verbal consent, and wait for a clear 'yes' or agreement.
-    Only call this tool after they have explicitly said yes to letting you escalate."""
+    """Create a human responder escalation request.
+
+    STRICT GUARDRAIL: You must NEVER call this tool automatically just because an emergency or disaster scenario is mentioned.
+    If the caller is asking hypothetical, general, or educational safety questions, DO NOT call this tool.
+    You MUST first verbally ask the caller: 'May I share your details with a human responder?'
+    ONLY call this tool AFTER the caller explicitly says 'yes', 'haan', 'theek hai', or gives clear verbal consent.
+    """
     logger.info(
         f"[TOOL CALLED] create_escalation(user_id={user_id!r}, who={who!r}, what_happened={what_happened!r}, "
         f"what_advised={what_advised!r}, urgency={urgency!r}, language={language_preference!r}, follow_up={follow_up_method!r})"
@@ -218,6 +233,7 @@ async def create_escalation(
         async with httpx.AsyncClient(timeout=8.0) as client:
             resp = await client.post(DISCORD_ESCALATION_WEBHOOK_URL, json=payload)
             resp.raise_for_status()
+            context.userdata["call_successful"] = True
             logger.info(f"[TOOL RESULT] create_escalation -> success (ref_id={ref_id})")
             return {"success": True, "reference_id": ref_id}
     except Exception as e:
@@ -288,6 +304,7 @@ async def get_weather_alert_status(context: RunContext, district: str):
             logger.info(
                 f"[TOOL RESULT] get_weather_alert_status -> {formatted_payload}"
             )
+            context.userdata["call_successful"] = True
             return formatted_payload
 
     except httpx.TimeoutException:
@@ -377,6 +394,16 @@ async def my_agent(ctx: JobContext):
         preemptive_generation=True,
     )
 
+    session.userdata = {"call_successful": False}
+
+    @session.on("close")
+    def _on_session_close(event):
+        outcome = (
+            "success" if session.userdata.get("call_successful", False) else "failed"
+        )
+        logger.info(f"[SESSION CLOSE] Call {ctx.job.id} ended. Outcome: {outcome}")
+        mark_call_outcome(ctx.job.id, outcome)
+
     # Trigger proactive greeting AFTER giving the SIP media stream a moment to establish
     @session.on("agent_started")
     def _on_agent_started():
@@ -394,6 +421,12 @@ async def my_agent(ctx: JobContext):
                 await session.say(opening_message)
 
             ctx.create_task(send_delayed_greeting())
+
+    start_call_record(
+        call_id=ctx.job.id,
+        user_id=caller_user_id,
+        channel="sip" if is_sip_call else "browser",
+    )
 
     await session.start(
         agent=Assistant(
@@ -413,5 +446,46 @@ async def my_agent(ctx: JobContext):
     )
 
 
+class DashboardHTTPHandler(BaseHTTPRequestHandler):
+    def log_message(self, format_str, *args):
+        # Prevent console logging spam
+        pass
+
+    def do_OPTIONS(self):
+        self.send_response(200)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.end_headers()
+
+    def do_GET(self):
+        if self.path == "/api/dashboard/stats":
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            try:
+                stats = get_call_stats()
+                self.wfile.write(json.dumps(stats).encode("utf-8"))
+            except Exception as e:
+                logger.error(f"[DASHBOARD API ERROR] {e}")
+                self.wfile.write(json.dumps({"error": str(e)}).encode("utf-8"))
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+
+def start_dashboard_server():
+    try:
+        server_address = ("0.0.0.0", 8000)
+        httpd = HTTPServer(server_address, DashboardHTTPHandler)
+        logger.info("[DASHBOARD] Started stats API server on port 8000")
+        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        thread.start()
+    except Exception as e:
+        logger.error(f"[DASHBOARD] Failed to start dashboard server: {e}")
+
+
 if __name__ == "__main__":
+    start_dashboard_server()
     cli.run_app(server)
