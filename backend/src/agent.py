@@ -102,7 +102,32 @@ ESCALATION (CRITICAL — you MUST follow these instructions when escalation is n
 - Once you call the tool, provide the caller with the reference_id returned by the tool (e.g., "A human responder has been notified with reference ID <id>. They'll follow up as soon as possible.") and explain next steps honestly without overpromising immediate response unless it's guaranteed.
 - If the conversation is normal (e.g. asking general safety questions) and does not meet the two triggers, do NOT call create_escalation.
 
+HANDOFF (IMPORTANT — you MUST use this tool when shelter logistics are requested):
+- If the caller asks specific, logistical questions about relief shelters (e.g. what to bring, what to expect, check-in/registration procedures, accessibility for disabled/infants, or duration of stay), you MUST transfer them to the specialist.
+- BEFORE calling the transfer_to_shelter_specialist tool, you MUST verbally announce to the caller: "I'll connect you to our shelter information specialist." and then immediately call the tool.
+- Do NOT try to answer shelter logistics questions yourself if they are detailed or specific.
+
 STYLE: Short sentences. Calm, steady pace. If the caller goes silent, gently check if they're still there instead of repeating yourself.
+"""
+
+SHELTER_SPECIALIST_PROMPT = """
+IDENTITY: You are the Shelter Information Specialist for Raksha (रक्षा in Hindi). You are a separate assistant focused ONLY on relief shelters. Always spell your name as रक्षा in Hindi, never राखा.
+
+OBJECTIVES: Help callers understand relief shelters:
+1. What to expect at a shelter (facilities, food, sanitation, safety).
+2. What to bring (medicine, IDs, essentials).
+3. How registration and check-in works.
+4. Accessibility for the elderly, disabled, and infants.
+5. How long people typically need to stay.
+
+LANGUAGE & SCRIPT:
+- Always reply in the exact language style the caller used in their last message (English, Hindi in Devanagari script, or Hinglish).
+
+HANDOFF (IMPORTANT — you MUST use this tool to return to the main assistant):
+- If the caller asks about general weather alerts, general safety guidance (e.g. earthquake safety steps, flood safety precautions), or emergency escalation, you MUST hand them back to the main assistant.
+- BEFORE calling the transfer_to_main_agent tool, you MUST verbally announce to the caller: "I'll connect you back to our main assistant for that." and then immediately call the tool.
+
+STYLE: Short sentences. Calm, steady, informative tone. Start the conversation with your identity introduction: "Hi, I'm the shelter information specialist — I can help with what to expect and how to prepare."
 """
 
 
@@ -324,6 +349,49 @@ async def get_weather_alert_status(context: RunContext, district: str):
         }
 
 
+@function_tool()
+async def transfer_to_shelter_specialist(context: RunContext, user_id: str):
+    """Transfer the call to the Shelter Information Specialist.
+    Call this tool ONLY when the caller asks specific questions about relief shelters:
+    what to bring, what to expect, check-in/registration procedures,
+    accessibility for elderly/disabled/infants, or how long to stay.
+    Do NOT call this for weather, general safety, or emergency escalation queries."""
+    logger.info(f"[TOOL CALLED] transfer_to_shelter_specialist(user_id={user_id!r})")
+    specialist = ShelterSpecialist(caller_user_id=user_id)
+    context.session.update_agent(specialist)
+    logger.info(
+        "[TOOL RESULT] transfer_to_shelter_specialist -> Switched active agent to ShelterSpecialist"
+    )
+    return {"status": "handoff_initiated", "agent": "ShelterSpecialist"}
+
+
+@function_tool()
+async def transfer_to_main_agent(context: RunContext, user_id: str):
+    """Transfer the call back to the main Raksha Assistant.
+    Call this tool when the user changes the topic to general weather alerts, general safety guidance,
+    emergency escalation, or asks a question outside relief shelter logistics."""
+    logger.info(f"[TOOL CALLED] transfer_to_main_agent(user_id={user_id!r})")
+    main_agent = Assistant(caller_user_id=user_id)
+    context.session.update_agent(main_agent)
+    logger.info(
+        "[TOOL RESULT] transfer_to_main_agent -> Switched active agent back to Assistant"
+    )
+    return {"status": "handoff_initiated", "agent": "Assistant"}
+
+
+class ShelterSpecialist(Agent):
+    def __init__(self, caller_user_id: str) -> None:
+        full_instructions = (
+            SHELTER_SPECIALIST_PROMPT
+            + f'\n\nCALLER_ID: The current caller\'s user_id is "{caller_user_id}". '
+            f"Use this exact value whenever you call transfer_to_main_agent — never ask the caller for an ID."
+        )
+        super().__init__(
+            instructions=full_instructions,
+            tools=[transfer_to_main_agent],
+        )
+
+
 class Assistant(Agent):
     def __init__(self, caller_user_id: str, custom_instructions: str = "") -> None:
         full_instructions = (
@@ -331,7 +399,7 @@ class Assistant(Agent):
             + custom_instructions
             + f'\n\nCALLER_ID: The current caller\'s user_id is "{caller_user_id}". '
             f"Use this exact value whenever you call lookup_caller, remember_caller, "
-            f"forget_caller, or create_escalation — never ask the caller for an ID."
+            f"forget_caller, create_escalation, or transfer_to_shelter_specialist — never ask the caller for an ID."
         )
         super().__init__(
             instructions=full_instructions,
@@ -341,6 +409,7 @@ class Assistant(Agent):
                 forget_caller,
                 get_weather_alert_status,
                 create_escalation,
+                transfer_to_shelter_specialist,
             ],
         )
 
