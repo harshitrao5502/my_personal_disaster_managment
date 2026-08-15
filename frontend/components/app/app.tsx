@@ -1,7 +1,9 @@
 'use client';
 
 import React, { useMemo, useState } from 'react';
+import Link from 'next/link';
 import { TokenSource } from 'livekit-client';
+import { BarChart3 } from 'lucide-react';
 import { useSession } from '@livekit/components-react';
 import { WarningIcon } from '@phosphor-icons/react/dist/ssr';
 import type { AppConfig } from '@/app-config';
@@ -113,6 +115,15 @@ export function App({ appConfig }: AppProps) {
         </a>
 
         <div className="ml-auto flex flex-col items-end gap-2 sm:flex-row sm:items-center sm:gap-3">
+          {!session.isConnected && (
+            <Link
+              href="/dashboard"
+              className="inline-flex items-center gap-1.5 rounded-full border border-teal-500/25 bg-teal-950/30 px-3.5 py-1.5 font-mono text-[10px] font-black tracking-wider text-teal-400 uppercase shadow-md transition-all duration-200 hover:border-teal-500/50 hover:bg-teal-950/50 hover:text-teal-300 md:text-xs"
+            >
+              <BarChart3 className="size-3.5 animate-pulse text-teal-500" />
+              <span>Call Analytics</span>
+            </Link>
+          )}
           <span className="text-foreground font-mono text-[10px] font-bold tracking-wider uppercase md:text-xs">
             Built with{' '}
             <a
